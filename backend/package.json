@@ -1,0 +1,22 @@
+{
+  "name": "bank-verification-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "pdf-parse": "^1.1.1",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7",
+    "tesseract.js": "^4.0.3"
+  },
+  "description": "- Node.js (v16+ recommended) - Install dependencies:   ```bash   cd backend   npm install   ```",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

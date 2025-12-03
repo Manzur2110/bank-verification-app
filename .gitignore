@@ -1,0 +1,8 @@
+node_modules/
+dist/
+build/
+uploads/
+bankdata.db
+.env
+.DS_Store
+*.log
