@@ -21,6 +21,10 @@ and runs basic text extraction heuristics. It's intentionally lightweight so you
    ```
    Frontend available at http://localhost:5173
 4. Upload an image or PDF from the React UI. The backend will attempt OCR (if tesseract.js is installed) or fallback to a simple filename/binary heuristic.
+5. to commit and make changes
+   ```bash
+   git add . ------------ git commit -m "Added column sorting & search functionality" ------------ git push
+   ```
 
 ## Notes & next steps
 - For real OCR accuracy, install tesseract.js (add to backend deps) or integrate cloud OCR (Google/ AWS / Azure).
