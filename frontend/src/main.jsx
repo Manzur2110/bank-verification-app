@@ -1,15 +1,13 @@
-import React from 'react'
-import ReactDOM from 'react-dom/client'
-import App from './App.jsx'
-import ExtractedDataView from './ExtractedDataView.jsx'
-import './index.css'
-import {
-  BrowserRouter as Router,
-  Routes,
-  Route
-} from "react-router-dom";
+// main.jsx
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 
-ReactDOM.createRoot(document.getElementById('root')).render(
+import App from "./App.jsx";
+import ExtractedDataView from "./ExtractedDataView.jsx";
+import "./index.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <Router>
       <Routes>
@@ -18,4 +16,4 @@ ReactDOM.createRoot(document.getElementById('root')).render(
       </Routes>
     </Router>
   </React.StrictMode>
-)
+);

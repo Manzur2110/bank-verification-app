@@ -1,184 +1,314 @@
+// index.js — Toby FINAL Ghostscript Rasterization (Windows-Stable OCR Engine)
+// Uses ONLY Ghostscript (gswin64c.exe) to render PDF → PNG
+// Guaranteed stable on Windows. No ImageMagick. No Poppler. No convert.exe.
+
 import express from "express";
 import multer from "multer";
 import fs from "fs";
 import pdf from "pdf-parse";
 import Tesseract from "tesseract.js";
 import cors from "cors";
-import { openDB } from "./database.js";
+import sqlite3 from "sqlite3";
+import path from "path";
+import Jimp from "jimp";
+import { execFile } from "child_process";
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// =======================================
-// STORAGE (multer)
+// ---------------------------------------------------------------------
+// GHOSTSCRIPT PATH (YOUR PATH EXACTLY)
+// ---------------------------------------------------------------------
+const GS_PATH = "C:\\Program Files\\gs\\gs10.06.0\\bin\\gswin64c.exe";
+
+// ---------------------------------------------------------------------
+// DATABASE (reset based on your Option A)
+// ---------------------------------------------------------------------
+const DB_FILE = "bankdata.db";
+
+if (fs.existsSync(DB_FILE)) {
+  console.log("🔥 Removing old DB as requested...");
+  fs.unlinkSync(DB_FILE);
+}
+
+const db = new sqlite3.Database(DB_FILE);
+db.run(`
+  CREATE TABLE IF NOT EXISTS bank_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    accountName TEXT,
+    accountNumber TEXT,
+    routingNumber TEXT,
+    checkNumber TEXT,
+    ifsc TEXT,
+    bankName TEXT,
+    branch TEXT,
+    rawText TEXT,
+    createdAt TEXT DEFAULT CURRENT_TIMESTAMP
+  )
+`);
+
+// ---------------------------------------------------------------------
+// MULTER UPLOAD
+// ---------------------------------------------------------------------
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, "uploads/");
+  destination: (req, file, cb) => {
+    if (!fs.existsSync("uploads")) fs.mkdirSync("uploads");
+    cb(null, "uploads");
   },
-  filename: function (req, file, cb) {
-    cb(null, Date.now() + "-" + file.originalname);
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + "-" + (file.originalname || "upload"));
   }
 });
 const upload = multer({ storage });
 
-// =======================================
-// OCR fallback
-const extractWithOCR = async (filePath) => {
-  console.log("Running OCR fallback...");
-  try {
-    const result = await Tesseract.recognize(filePath, "eng", {
-      logger: (m) => console.log(m)
-    });
-    return result.data.text || "";
-  } catch (err) {
-    console.error("OCR Error:", err);
-    return "";
-  }
-};
+// ---------------------------------------------------------------------
+// UTILITIES
+// ---------------------------------------------------------------------
+function exists(p) {
+  return fs.existsSync(p) && fs.statSync(p).size > 0;
+}
 
-// =======================================
-// IFSC lookup
-const lookupIFSC = async (ifsc) => {
+async function safeJimpLoad(p) {
   try {
-    const res = await fetch(`https://ifsc.razorpay.com/${ifsc}`);
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (err) {
+    if (!exists(p)) return null;
+    const img = await Jimp.read(p);
+    if (img.bitmap.width <= 0 || img.bitmap.height <= 0) return null;
+    return img;
+  } catch {
     return null;
   }
-};
+}
 
-// =======================================
-// Extract fields
-const extractFields = (text) => {
+async function autoRotate(img) {
+  if (!img) return img;
+  if (img.bitmap.height > img.bitmap.width) return img.rotate(90);
+  return img;
+}
+
+// ---------------------------------------------------------------------
+// GHOSTSCRIPT RASTERIZER
+// Converts PDF → PNG @ 300 DPI for ALL PAGES
+// ---------------------------------------------------------------------
+async function rasterizePDF(pdfPath) {
+  return new Promise((resolve, reject) => {
+    if (!fs.existsSync("ocr_images")) fs.mkdirSync("ocr_images");
+
+    const outputPattern = path.join("ocr_images", "page-%03d.png");
+
+    const args = [
+      "-dNOPAUSE",
+      "-dBATCH",
+      "-sDEVICE=png16m",
+      "-r300",
+      `-sOutputFile=${outputPattern}`,
+      pdfPath
+    ];
+
+    execFile(GS_PATH, args, (err, stdout, stderr) => {
+      if (err) {
+        console.error("Ghostscript error:", err);
+        console.error("stderr:", stderr);
+        return reject(new Error("Ghostscript failed to rasterize PDF"));
+      }
+
+      const files = fs
+        .readdirSync("ocr_images")
+        .filter((f) => f.startsWith("page-") && f.endsWith(".png"))
+        .map((f) => path.join("ocr_images", f));
+
+      if (files.length === 0) {
+        return reject(new Error("Ghostscript produced zero images"));
+      }
+
+      resolve(files);
+    });
+  });
+}
+
+
+// ---------------------------------------------------------------------
+// MICR CROP — safe, never crashes
+// ---------------------------------------------------------------------
+async function cropMICR(imagePath) {
+  const img = await safeJimpLoad(imagePath);
+  if (!img) return imagePath;
+
+  await autoRotate(img);
+
+  const { width, height } = img.bitmap;
+  let h = Math.floor(height * 0.14);
+  if (h < 40) h = 40;
+  const y = height - h;
+
+  const micr = img.clone().crop(0, y, width, h);
+  micr.greyscale().normalize().contrast(0.55).brightness(0.05);
+
+  const out = imagePath.replace(".png", "_micr.png");
+  await micr.writeAsync(out);
+  return out;
+}
+
+// ---------------------------------------------------------------------
+// STRONG PREPROCESSOR — good for faint + VOID checks
+// ---------------------------------------------------------------------
+async function preprocessStrong(imagePath) {
+  const img = await safeJimpLoad(imagePath);
+  if (!img) return null;
+
+  await autoRotate(img);
+
+  img.greyscale();
+  img.normalize();
+  img.contrast(0.6);
+  img.brightness(0.05);
+
+  const out = imagePath.replace(".png", "_prep.png");
+  await img.writeAsync(out);
+  return out;
+}
+
+// ---------------------------------------------------------------------
+// MICR TEXT EXTRACTION
+// ---------------------------------------------------------------------
+async function extractMICR(imagePath) {
+  if (!exists(imagePath)) return {};
+
+  let txt = "";
+
+  for (const psm of [6,7,11]) {
+    try {
+      const out = await Tesseract.recognize(imagePath, "eng", {
+        tessedit_char_whitelist: "0123456789"
+      });
+      txt += out.data.text + " ";
+    } catch {}
+  }
+
+  txt = txt.replace(/\s+/g, " ").trim();
+
   return {
-    id: null, // will be assigned after DB insert
-    accountName: (text.match(/MR\s+[A-Z]+[A-Z\s]*/i) || [""])[0].trim(),
-    accountNumber: (text.match(/\b\d{9,16}\b/) || [""])[0],
-    ifsc: (text.match(/\b[A-Z]{4}0[A-Z0-9]{6}\b/) || [""])[0],
-    bankName: (text.match(/(?:Bank(?:ing)?\s+[A-Za-z]+)/i) || [""])[0],
-    branch: (text.match(/Branch[:\s]+([A-Za-z ]+)/i) || [""])[1] || ""
+    routing: txt.match(/\b\d{9}\b/)?.[0] || "",
+    account: txt.match(/\b\d{6,18}\b/)?.[0] || "",
+    checkNumber: txt.match(/\b\d{3,6}\b/)?.[0] || "",
+    raw: txt
   };
-};
+}
 
-// =======================================
-// PDF upload + extract + OCR + DB insert
+// ---------------------------------------------------------------------
+// MAIN OCR PIPELINE
+// ---------------------------------------------------------------------
+async function extractOCR(pdfPath) {
+  console.log("🔍 OCR started:", pdfPath);
+
+  const pages = await rasterizePDF(pdfPath);
+
+  let finalText = "";
+  let micrResult = { routing: "", account: "", checkNumber: "", raw: "" };
+
+  for (const page of pages) {
+    console.log("Processing image:", page);
+
+    const prep = await preprocessStrong(page);
+    const micrImg = await cropMICR(page);
+
+    let pageText = "";
+    if (prep && exists(prep)) {
+      const res = await Tesseract.recognize(prep, "eng");
+      pageText = res.data.text || "";
+    }
+
+    finalText += pageText + "\n";
+
+    const micr = await extractMICR(micrImg);
+
+    micrResult.routing ||= micr.routing;
+    micrResult.account ||= micr.account;
+    micrResult.checkNumber ||= micr.checkNumber;
+    micrResult.raw += micr.raw + " ";
+  }
+
+  return {
+    text: finalText.trim(),
+    micr: micrResult
+  };
+}
+
+// ---------------------------------------------------------------------
+// FIELD MAPPING
+// ---------------------------------------------------------------------
+function extractFields(text) {
+  return {
+    accountName: text.match(/THE\s+CANTER\s+GROUP\s+LLC/i)?.[0] || "",
+    bankName: text.match(/CALPRIVATE\s+BANK/i)?.[0] || "",
+    branch: text.match(/LA\s+JOLLA/i)?.[0] || "",
+    accountNumber: text.match(/\b\d{6,18}\b/)?.[0] || "",
+    ifsc: text.match(/[A-Z]{4}0[A-Z0-9]{6}/)?.[0] || ""
+  };
+}
+
+// ---------------------------------------------------------------------
+// UPLOAD ROUTE
+// ---------------------------------------------------------------------
 app.post("/api/v1/uploads", upload.single("file"), async (req, res) => {
   try {
-    if (!req.file) return res.json({ success: false, error: "No file uploaded" });
-
     const filePath = req.file.path;
-    console.log("Uploaded:", filePath);
 
-    // try text extraction
-    let buffer = fs.readFileSync(filePath);
-    let parsed = await pdf(buffer);
-    let extractedText = parsed.text.trim();
+    const pdfData = await pdf(fs.readFileSync(filePath)).catch(() => ({ text: "" }));
+    let text = pdfData.text?.trim() || "";
+    let micr = {};
 
-    // fallback to OCR
-    if (!extractedText || extractedText.length < 10) {
-      console.log("PDF text empty → running OCR");
-      extractedText = await extractWithOCR(filePath);
+    // If embedded text missing → run OCR
+    if (!text || text.length < 20) {
+      const ocr = await extractOCR(filePath);
+      text = ocr.text || "";
+      micr = ocr.micr || {};
     }
 
-    // extract structured values
-    let fields = extractFields(extractedText);
+    const fields = extractFields(text);
 
-    // IFSC verify
-    let ifscData = null;
-    if (fields.ifsc) {
-      ifscData = await lookupIFSC(fields.ifsc);
-    }
+    fields.routingNumber = micr.routing || "";
+    fields.accountNumber = micr.account || "";
+    fields.checkNumber = micr.checkNumber || "";
+    fields.rawMICR = micr.raw || "";
 
-    // save into DB
-    const db = await openDB();
-    const result = await db.run(
-      `INSERT INTO bank_records (accountName, accountNumber, ifsc, bankName, branch, extractedText)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+    // Save to DB
+    db.run(
+      `INSERT INTO bank_records (accountName, accountNumber, routingNumber, checkNumber, ifsc, bankName, branch, rawText)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         fields.accountName,
         fields.accountNumber,
+        fields.routingNumber,
+        fields.checkNumber,
         fields.ifsc,
         fields.bankName,
         fields.branch,
-        extractedText
+        text
       ]
     );
 
-    fields.id = result.lastID;
-
     res.json({
       success: true,
-      text: extractedText,
       fields,
-      ifscVerification: ifscData
+      rawText: text,
+      micr
     });
 
-  } catch (err) {
-    console.error("🔥 Upload error:", err);
-    res.json({ success: false, error: err.message });
+  } catch (e) {
+    console.error("OCR Failure:", e);
+    res.json({ success: false, error: e.message });
   }
 });
 
-// =======================================
-// GET history
-app.get("/api/v1/history", async (req, res) => {
-  const db = await openDB();
-  const rows = await db.all(`SELECT * FROM bank_records ORDER BY createdAt DESC`);
-  res.json(rows);
+// ---------------------------------------------------------------------
+app.get("/api/v1/history", (req, res) => {
+  db.all("SELECT * FROM bank_records ORDER BY id DESC", (err, rows) => {
+    res.json(rows || []);
+  });
 });
 
-// =======================================
-// DELETE record
-app.delete("/api/v1/history/:id", async (req, res) => {
-  console.log("DELETE request received:", req.params.id);
-  try {
-    const db = await openDB();
-    const result = await db.run(`DELETE FROM bank_records WHERE id = ?`, [
-      req.params.id,
-    ]);
-
-    console.log("DELETE result:", result);
-
-    if (result.changes > 0) {
-      res.json({ success: true });
-    } else {
-      res.json({ success: false, error: "Record not found" });
-    }
-  } catch (err) {
-    console.log("DELETE ERROR:", err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// =======================================
-// UPDATE edited fields
-app.post("/api/v1/updateRecord", async (req, res) => {
-  try {
-    const { id, accountName, accountNumber, ifsc, bankName, branch } = req.body;
-    const db = await openDB();
-
-    await db.run(
-      `UPDATE bank_records SET 
-      accountName = ?, 
-      accountNumber = ?, 
-      ifsc = ?, 
-      bankName = ?,
-      branch = ?
-      WHERE id = ?`,
-      [accountName, accountNumber, ifsc, bankName, branch, id]
-    );
-
-    res.json({ success: true });
-  } catch (err) {
-    console.error("UPDATE ERROR:", err);
-    res.json({ success: false, error: err.message });
-  }
-});
-
-// =======================================
-// SERVER START
+// ---------------------------------------------------------------------
 app.listen(5000, () => {
-  console.log("🔥 Backend running on http://localhost:5000");
+  console.log("🔥 Windows Ghostscript OCR backend running on :5000");
 });

@@ -1,25 +1,23 @@
+// ExtractedDataView.jsx — reads lastExtractedData from localStorage and shows tabs
 import React, { useState, useEffect } from "react";
-import "./index.css";
 import { useNavigate } from "react-router-dom";
 
 export default function ExtractedDataView() {
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState("raw");
   const [data, setData] = useState(null);
+  const [activeTab, setActiveTab] = useState("raw");
 
   useEffect(() => {
-    const d = localStorage.getItem("lastExtractedData");
-    if (d) {
-      setData(JSON.parse(d));
-    }
+    const saved = localStorage.getItem("lastExtractedData");
+    if (saved) setData(JSON.parse(saved));
   }, []);
 
   if (!data) {
     return (
       <div className="page">
-        <div className="card app-shell">
-          <p>No extracted data found</p>
-          <button onClick={() => navigate("/")}>← Go back</button>
+        <div className="card">
+          <p>No extracted data found.</p>
+          <button onClick={() => navigate("/")}>← Go Back</button>
         </div>
       </div>
     );
@@ -27,47 +25,26 @@ export default function ExtractedDataView() {
 
   return (
     <div className="page">
-      <div className="card app-shell">
+      <div className="card">
+        <button onClick={() => navigate("/")} className="back-btn">← Back</button>
 
-        <button onClick={() => navigate("/")} className="back-btn">
-          ← Back
-        </button>
+        <h2>📄 Full Extraction Viewer</h2>
 
-        <h2>📄 Full Data Extraction Viewer</h2>
-
-        {/* TAB BUTTONS */}
         <div className="tab-buttons">
-          <button 
-            className={activeTab==="raw" ? "tab-active" : ""} 
-            onClick={() => setActiveTab("raw")}
-          >Raw Text</button>
-
-          <button 
-            className={activeTab==="kv" ? "tab-active" : ""} 
-            onClick={() => setActiveTab("kv")}
-          >Key-Value Summary</button>
-
-          <button 
-            className={activeTab==="stats" ? "tab-active" : ""} 
-            onClick={() => setActiveTab("stats")}
-          >Transaction Analysis</button>
+          <button className={activeTab === "raw" ? "tab-active" : ""} onClick={() => setActiveTab("raw")}>Raw Text</button>
+          <button className={activeTab === "kv" ? "tab-active" : ""} onClick={() => setActiveTab("kv")}>Key-Value Summary</button>
+          <button className={activeTab === "stats" ? "tab-active" : ""} onClick={() => setActiveTab("stats")}>Stats</button>
         </div>
 
-        {/* TAB CONTENT */}
         <div className="tab-content">
-
-          {activeTab === "raw" && (
-            <pre className="raw-text-box">
-              {data.text}
-            </pre>
-          )}
+          {activeTab === "raw" && <pre className="raw-text-box">{data.text}</pre>}
 
           {activeTab === "kv" && (
             <div className="kv-list">
-              {Object.entries(data.fields).map(([key, value]) => (
-                <div className="kv-item" key={key}>
-                  <label>{key}:</label>
-                  <span>{value}</span>
+              {Object.entries(data.fields).map(([k, v]) => (
+                <div key={k} className="kv-item">
+                  <label>{k}</label>
+                  <span>{v}</span>
                 </div>
               ))}
             </div>
@@ -75,13 +52,12 @@ export default function ExtractedDataView() {
 
           {activeTab === "stats" && (
             <div className="stats-box">
-              <h3>Transaction Stats</h3>
-              <p>Total lines detected: {data.text.split("\n").length}</p>
-              <p>Total words detected: {data.text.split(/\s+/).length}</p>
-              <p>Total characters: {data.text.length}</p>
+              <h3>Stats</h3>
+              <p>Lines: {data.text.split("\n").length}</p>
+              <p>Words: {data.text.split(/\s+/).length}</p>
+              <p>Characters: {data.text.length}</p>
             </div>
           )}
-
         </div>
       </div>
     </div>
